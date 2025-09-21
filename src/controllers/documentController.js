@@ -67,9 +67,15 @@ exports.uploadDocument = async (req, res) => {
 };
 
 // Get User Documents - Fix the query and response
+// Get User Documents - Add debug logging
 exports.getDocuments = async (req, res) => {
   try {
     const { category, type, page = 1, limit = 12, search } = req.query;
+
+    console.log("Get documents request:", {
+      userId: req.user.id,
+      query: req.query,
+    });
 
     const query = {
       uploadedBy: req.user.id,
@@ -86,13 +92,17 @@ exports.getDocuments = async (req, res) => {
       ];
     }
 
+    console.log("MongoDB query:", query);
+
     const documents = await Document.find(query)
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
-      .select("-filePath"); // Don't expose file paths
+      .select("-filePath");
 
     const total = await Document.countDocuments(query);
+
+    console.log(`Found ${documents.length} documents out of ${total} total`);
 
     logger.info(
       `Documents retrieved for user ${req.user.email}: ${documents.length} documents`
@@ -106,6 +116,7 @@ exports.getDocuments = async (req, res) => {
       hasMore: page * limit < total,
     });
   } catch (error) {
+    console.error("Get documents error:", error);
     logger.error("Get documents error:", error);
     res.status(500).json({
       message: "Failed to retrieve documents",
@@ -140,15 +151,41 @@ exports.getDocument = async (req, res) => {
 };
 
 // Download Document
+// Download Document
 exports.downloadDocument = async (req, res) => {
   try {
-    const document = await Document.findOne({
-      _id: req.params.id,
+    const documentId = req.params.id;
+
+    // First, check if user owns the document
+    let document = await Document.findOne({
+      _id: documentId,
       uploadedBy: req.user.id,
     });
 
+    // If not owned, check if it's shared with the user
     if (!document) {
-      return res.status(404).json({ message: "Document not found" });
+      const SharedDocument = require("../models/SharedDocument");
+      const sharedDoc = await SharedDocument.findOne({
+        document: documentId,
+        sharedWith: req.user.id,
+        isActive: true,
+        expiresAt: { $gt: new Date() },
+      }).populate("document");
+
+      if (sharedDoc && sharedDoc.permissions === "download") {
+        document = sharedDoc.document;
+
+        // Update access count for shared document
+        sharedDoc.accessCount += 1;
+        sharedDoc.lastAccessed = new Date();
+        await sharedDoc.save();
+      }
+    }
+
+    if (!document) {
+      return res
+        .status(404)
+        .json({ message: "Document not found or access denied" });
     }
 
     const filePath = path.join(__dirname, "../../", document.filePath);
